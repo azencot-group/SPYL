@@ -1,9 +1,11 @@
 import numpy as np
 import torch
-import torch as nn
-
+import torch.nn as nn
 
 # ---------------- encoder -----------------------
+from cdsvae.utils import reparameterize
+
+
 class dcgan_conv(nn.Module):
     def __init__(self, nin, nout):
         super(dcgan_conv, self).__init__()
@@ -101,17 +103,6 @@ class decoder_convT(nn.Module):
 
 
 # ---------------- model -----------------------
-def reparameterize(mean, logvar, random_sampling=True):
-    # Reparametrization occurs only if random sampling is set to true, otherwise mean is returned
-    if random_sampling is True:
-        eps = torch.randn_like(logvar)
-        std = torch.exp(0.5 * logvar)
-        z = mean + eps * std
-        return z
-    else:
-        return mean
-
-
 class CDSVAE(nn.Module):
     def __init__(self, opt):
         super(CDSVAE, self).__init__()
@@ -330,36 +321,68 @@ class CDSVAE(nn.Module):
 
         return recon_x_sample
 
-    def samples_tr(self, sz=96):
-        # sz means the number of samples
-        f_shape = (sz, self.f_dim)
-
-        # sample f
-        f_prior = reparameterize(torch.zeros(f_shape).cuda(), torch.zeros(f_shape).cuda(), random_sampling=True)
-        f_expand = f_prior.unsqueeze(1).expand(-1, self.frames, self.f_dim)
-
-        # sample z
-        z_mean_prior, z_logvar_prior, z_out = self.sample_motion_prior(sz, self.frames, random_sampling=True)
-        zf = torch.cat((z_mean_prior, f_expand), dim=2)
-        recon_x_sample = self.decoder(zf)
-        f_mean, f_logvar, f_post, z_mean_post, z_logvar_post, z_post = self.encode_and_sample_post(recon_x_sample)
-
-        return f_mean, f_logvar, torch.mean(z_mean_post, dim=1), torch.mean(z_logvar_post, dim=1)
-
     def forward_exchange(self, x):
         f_mean, f_logvar, f, z_mean_post, z_logvar_post, z = self.encode_and_sample_post(x)
-
-        # perm = torch.LongTensor(np.random.permutation(f.shape[0]))
-        # f_mix = f[perm]
 
         a = f[np.arange(0, f.shape[0], 2)]
         b = f[np.arange(1, f.shape[0], 2)]
         f_mix = torch.stack((b, a), dim=1).view((-1, f.shape[1]))
-        # mix = torch.stack((b[0], a[0], b[1], a[1], b[2], a[2], b[3], a[3], b[4], a[4]), dim=0)
-        # f_mix = torch.cat((mix, a[5:], b[5:]))
 
         f_expand = f_mix.unsqueeze(1).expand(-1, self.frames, self.f_dim)
 
         zf = torch.cat((z, f_expand), dim=2)
         recon_x = self.decoder(zf)
         return f_mean, f_logvar, f, None, None, z, None, None, recon_x
+
+
+# ---------------- classifier -----------------------
+class classifier_Sprite_all(nn.Module):
+    def __init__(self, opt):
+        super(classifier_Sprite_all, self).__init__()
+        self.g_dim = opt.g_dim  # frame feature
+        self.channels = opt.channels  # frame feature
+        self.hidden_dim = opt.rnn_size
+        self.frames = opt.frames
+        self.encoder = encoder(self.g_dim, self.channels)
+        self.bilstm = nn.LSTM(self.g_dim, self.hidden_dim, 1, bidirectional=True, batch_first=True)
+        self.cls_skin = nn.Sequential(
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(self.hidden_dim, 6))
+        self.cls_top = nn.Sequential(
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(self.hidden_dim, 6))
+        self.cls_pant = nn.Sequential(
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(self.hidden_dim, 6))
+        self.cls_hair = nn.Sequential(
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(self.hidden_dim, 6))
+        self.cls_action = nn.Sequential(
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(self.hidden_dim, 9))
+
+    def encoder_frame(self, x):
+        # input x is list of length Frames [batchsize, channels, size, size]
+        # convert it to [batchsize, frames, channels, size, size]
+        # x = torch.stack(x, dim=1)
+        # [batch_size, frames, channels, size, size] to [batch_size * frames, channels, size, size]
+        x_shape = x.shape
+        x = x.view(-1, x_shape[-3], x_shape[-2], x_shape[-1])
+        x_embed = self.encoder(x)[0]
+        # to [batch_size , frames, embed_dim]
+        return x_embed.view(x_shape[0], x_shape[1], -1)
+
+    def forward(self, x):
+        conv_x = self.encoder_frame(x)
+        # pass the bidirectional lstm
+        lstm_out, _ = self.bilstm(conv_x)
+        backward = lstm_out[:, 0, self.hidden_dim:2 * self.hidden_dim]
+        frontal = lstm_out[:, self.frames - 1, 0:self.hidden_dim]
+        lstm_out_f = torch.cat((frontal, backward), dim=1)
+        return self.cls_action(lstm_out_f), self.cls_skin(lstm_out_f), self.cls_pant(lstm_out_f), \
+               self.cls_top(lstm_out_f), self.cls_hair(lstm_out_f)
