@@ -19,7 +19,7 @@ from swaps_experiment import check_cls
 def arg_parse():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr', default=2.e-3, type=float, help='learning rate')
-    parser.add_argument('--batch_size', default=100, type=int, help='batch size')
+    parser.add_argument('--batch_size', default=128, type=int, help='batch size')
     parser.add_argument('--nEpoch', default=1000, type=int, help='number of epochs to train for')
     parser.add_argument('--seed', default=1, type=int, help='manual seed')
     parser.add_argument('--evl_interval', default=10, type=int, help='evaluate every n epoch')
@@ -31,16 +31,16 @@ def arg_parse():
     parser.add_argument('--channels', default=3, type=int, help='number of channels in images')
     parser.add_argument('--image_width', default=64, type=int, help='the height / width of the input image to network')
     parser.add_argument('--decoder', default='ConvT', type=str, help='Upsampling+Conv or Transpose Conv: Conv or ConvT')
-    parser.add_argument('--f_rnn_layers', default=1, type=int, help='number of layers (content lstm)')
+    parser.add_argument('--s_rnn_layers', default=1, type=int, help='number of layers (content lstm)')
     parser.add_argument('--rnn_size', default=256, type=int, help='dimensionality of hidden layer')
-    parser.add_argument('--f_dim', default=256, type=int, help='dim of f')
-    parser.add_argument('--z_dim', default=32, type=int, help='dimensionality of z_t')
+    parser.add_argument('--s_dim', default=256, type=int, help='dim of s')
+    parser.add_argument('--d_dim', default=32, type=int, help='dimensionality of d_t')
     parser.add_argument('--g_dim', default=128, type=int,
                         help='dimensionality of encoder output vector and decoder input vector')
     parser.add_argument('--note', default='LogNCELoss', type=str, help='appx note')
-    parser.add_argument('--weight_s', default=1, type=float, help='weighting on KL to prior, content vector')
+    parser.add_argument('--weight_s', default=5, type=float, help='weighting on KL to prior, content vector')
     parser.add_argument('--weight_d', default=1, type=float, help='weighting on KL to prior, motion vector')
-    parser.add_argument('--weight_rec', default=1, type=float, help='weighting on reconstruction loss')
+    parser.add_argument('--weight_rec', default=10, type=float, help='weighting on reconstruction loss')
     parser.add_argument('--gpu', default='0', type=str, help='index of GPU to use')
 
     # ----- sample and predict arguments ----- #
@@ -49,7 +49,7 @@ def arg_parse():
     parser.add_argument('--weight_m_aug', default=0, type=float, help='weighting on motion contrastive loss')
 
     parser.add_argument('--c_loss', default=50, type=float, help='warmup epochs for contrastive loss')
-    parser.add_argument('--c_floss', default=90, type=float, help='weighting on motion contrastive loss')
+    parser.add_argument('--c_floss', default=1, type=float, help='weighting on contrastive loss')
 
     parser.add_argument('--neg_mode', type=str, default='soft',
                         help='The third which we going to sample negatives from.'
@@ -87,12 +87,12 @@ def train(x, model, optimizer, contras_fn, args, mode="train"):
     kld_f, kld_z, s_logvar, s_mean = kl_loss_calc(d_post_logvar, d_post_mean, d_prior_logvar, d_prior_mean, s_logvar,
                                                   s_mean)
     l_recon, kld_f, kld_z = l_recon / batch_size, kld_f / batch_size, kld_z / batch_size
-    batch_size, n_frame, z_dim = d_post_mean.size()
+    batch_size, n_frame, d_dim = d_post_mean.size()
     # calculate the mutual information of s and d analytically
     mi_sd = torch.zeros((1)).cuda()
     mi_sd = cdsvae_utils.calculate_mws(batch_size, d_post, d_post_logvar, d_post_mean, mi_sd, n_frame, args, s,
                                        s_logvar,
-                                       s_mean, z_dim)
+                                       s_mean, d_dim)
 
     loss = l_recon * args.weight_rec + kld_f * args.weight_s + kld_z * args.weight_d + mi_sd
 
@@ -103,17 +103,17 @@ def train(x, model, optimizer, contras_fn, args, mode="train"):
     # generation of batch of random samples.
     # b stands for bank of potential neg
     with torch.no_grad():
-        f_bneg_mean, f_bneg_logvar, z_bneg_mean, z_bneg_logvar = samples_tr(model, sz=(args.batch_size * 4))
+        s_bneg_mean, s_bneg_logvar, d_bneg_mean, d_bneg_logvar = samples_tr(model, sz=(args.batch_size * 4))
 
     # sample and predict estimation of the content
     if args.weight_c_aug != 0:
         # forward sampling new motion (content_aug)
         c_aug = model.forward_fixed_content_for_classification_tr(x)
-        f_mean_c, f_logvar_c, f_c, _, _, _, _, _, _, recon_c_aug = model(c_aug.cuda())
+        s_mean_c, s_logvar_c, s_c, _, _, _, _, _, _, recon_c_aug = model(c_aug.cuda())
         # get negative samples from the bank
-        f_neg_mean = kl_contrast(s_mean, s_logvar, f_bneg_mean, f_bneg_logvar, args)
+        s_neg_mean = kl_contrast(s_mean, s_logvar, s_bneg_mean, s_bneg_logvar, args)
         # calculate contrastive estimation
-        con_est_mi_s = contras_fn(s_mean.squeeze(), f_mean_c, f_neg_mean)
+        con_est_mi_s = contras_fn(s_mean.squeeze(), s_mean_c, s_neg_mean)
 
         loss += con_est_mi_s * args.weight_c_aug
 
@@ -122,17 +122,17 @@ def train(x, model, optimizer, contras_fn, args, mode="train"):
         # forward sampling new content (motion_aug)
         m_aug = model.forward_fixed_action_for_classification_tr(x)
         # full cycle for content generation
-        _, _, _, z_post_mean_m, z_post_logvar_m, z_post_m, _, _, _, recon_m_aug = model(m_aug.cuda())
+        _, _, _, d_post_mean_m, d_post_logvar_m, d_post_m, _, _, _, recon_m_aug = model(m_aug.cuda())
 
-        d_post_mean, d_post_logvar, z_post_mean_m = torch.mean(d_post_mean, dim=1), torch.mean(d_post_logvar,
+        d_post_mean, d_post_logvar, d_post_mean_m = torch.mean(d_post_mean, dim=1), torch.mean(d_post_logvar,
                                                                                                dim=1), torch.mean(
-            z_post_mean_m, dim=1)
+            d_post_mean_m, dim=1)
         # get negative samples from the bank
-        z_neg_mean = kl_contrast(d_post_mean, d_post_logvar, z_bneg_mean, z_bneg_logvar, args)
+        d_neg_mean = kl_contrast(d_post_mean, d_post_logvar, d_bneg_mean, d_bneg_logvar, args)
         # calculate contrastive estimation
         con_est_mi_d = contras_fn(d_post_mean.view(batch_size, -1),
-                                  z_post_mean_m.view(batch_size, -1),
-                                  z_neg_mean)
+                                  d_post_mean_m.view(batch_size, -1),
+                                  d_neg_mean)
 
         loss += con_est_mi_d * args.weight_m_aug
 
@@ -237,7 +237,6 @@ def main(args):
 
             check_cls(cdsvae, classifier, test_loader, args)
 
-    torch.save(cdsvae, "model.pth")
 
 #
 if __name__ == '__main__':

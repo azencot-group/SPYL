@@ -36,7 +36,7 @@ def log_importance_weight_matrix(batch_size, dataset_size):
 
 
 def compute_mi(latent_sample, latent_dist):
-    log_pz, log_qz, log_prod_qzi, log_q_zCx = _get_log_pz_qz_prodzi_qzCx(latent_sample,
+    log_pz, log_qz, log_prod_qzi, log_q_zCx = _get_log_pd_qd_prodzi_qzCx(latent_sample,
                                                                          latent_dist,
                                                                          None,
                                                                          is_mss=False)
@@ -46,7 +46,7 @@ def compute_mi(latent_sample, latent_dist):
     return mi_loss
 
 
-def _get_log_pz_qz_prodzi_qzCx(latent_sample, latent_dist, n_data, is_mss=True):
+def _get_log_pd_qd_prodzi_qzCx(latent_sample, latent_dist, n_data, is_mss=True):
     batch_size, hidden_dim = latent_sample.shape
     # print("latent_sample:", latent_sample.shape)
     # print("latent_dist:", len(latent_dist), latent_dist[0].shape, latent_dist[1].shape)
@@ -110,25 +110,25 @@ def log_importance_weight_matrix(batch_size, dataset_size):
     return W.log()
 
 
-def calculate_mws(batch_size, d_post, d_post_logvar, d_post_mean, mi_fz, n_frame, opt, s, s_logvar, s_mean, z_dim):
+def calculate_mws(batch_size, d_post, d_post_logvar, d_post_mean, mi_fz, n_frame, opt, s, s_logvar, s_mean, d_dim):
     # compute log q(z) ~= log 1/(NM) sum_m=1^M q(z|x_m) = - log(MN) + logsumexp_m(q(z|x_m))
-    # batch_size x batch_size x f_dim
-    _logq_f_tmp = log_density(s.unsqueeze(0).repeat(n_frame, 1, 1).view(n_frame, batch_size, 1, opt.f_dim),
+    # batch_size x batch_size x s_dim
+    _logq_s_tmp = log_density(s.unsqueeze(0).repeat(n_frame, 1, 1).view(n_frame, batch_size, 1, opt.s_dim),
                               # [8, 128, 1, 256]
-                              s_mean.unsqueeze(0).repeat(n_frame, 1, 1).view(n_frame, 1, batch_size, opt.f_dim),
+                              s_mean.unsqueeze(0).repeat(n_frame, 1, 1).view(n_frame, 1, batch_size, opt.s_dim),
                               # [8, 1, 128, 256]
                               s_logvar.unsqueeze(0).repeat(n_frame, 1, 1).view(n_frame, 1, batch_size,
-                                                                               opt.f_dim))  # [8, 1, 128, 256]
-    # n_frame x batch_size x batch_size x f_dim
-    _logq_z_tmp = log_density(d_post.transpose(0, 1).view(n_frame, batch_size, 1, z_dim),  # [8, 128, 1, 32]
-                              d_post_mean.transpose(0, 1).view(n_frame, 1, batch_size, z_dim),  # [8, 1, 128, 32]
-                              d_post_logvar.transpose(0, 1).view(n_frame, 1, batch_size, z_dim))  # [8, 1, 128, 32]
-    _logq_fz_tmp = torch.cat((_logq_f_tmp, _logq_z_tmp), dim=3)  # [8, 128, 128, 288]
-    logq_f = (logsumexp(_logq_f_tmp.sum(3), dim=2, keepdim=False) - math.log(
+                                                                               opt.s_dim))  # [8, 1, 128, 256]
+    # n_frame x batch_size x batch_size x s_dim
+    _logq_d_tmp = log_density(d_post.transpose(0, 1).view(n_frame, batch_size, 1, d_dim),  # [8, 128, 1, 32]
+                              d_post_mean.transpose(0, 1).view(n_frame, 1, batch_size, d_dim),  # [8, 1, 128, 32]
+                              d_post_logvar.transpose(0, 1).view(n_frame, 1, batch_size, d_dim))  # [8, 1, 128, 32]
+    _logq_fd_tmp = torch.cat((_logq_s_tmp, _logq_d_tmp), dim=3)  # [8, 128, 128, 288]
+    logq_f = (logsumexp(_logq_s_tmp.sum(3), dim=2, keepdim=False) - math.log(
         batch_size * opt.dataset_size))  # [8, 128]
-    logq_z = (logsumexp(_logq_z_tmp.sum(3), dim=2, keepdim=False) - math.log(
+    logq_z = (logsumexp(_logq_d_tmp.sum(3), dim=2, keepdim=False) - math.log(
         batch_size * opt.dataset_size))  # [8, 128]
-    logq_fz = (logsumexp(_logq_fz_tmp.sum(3), dim=2, keepdim=False) - math.log(
+    logq_fz = (logsumexp(_logq_fd_tmp.sum(3), dim=2, keepdim=False) - math.log(
         batch_size * opt.dataset_size))  # [8, 128]
     # n_frame x batch_size
     mi_fz = F.relu(logq_fz - logq_f - logq_z).mean()
@@ -141,10 +141,10 @@ def kl_loss_calc(d_post_logvar, d_post_mean, d_prior_logvar, d_prior_mean, s_log
     s_logvar = s_logvar.view((-1, s_logvar.shape[-1]))  # [128, 256]
     kld_f = -0.5 * torch.sum(1 + s_logvar - torch.pow(s_mean, 2) - torch.exp(s_logvar))
     # ----- calculate KL of z ----- #
-    z_post_var = torch.exp(d_post_logvar)  # [128, 8, 32]
-    z_prior_var = torch.exp(d_prior_logvar)  # [128, 8, 32]
+    d_post_var = torch.exp(d_post_logvar)  # [128, 8, 32]
+    d_prior_var = torch.exp(d_prior_logvar)  # [128, 8, 32]
     kld_z = 0.5 * torch.sum(d_prior_logvar - d_post_logvar +
-                            ((z_post_var + torch.pow(d_post_mean - d_prior_mean, 2)) / z_prior_var) - 1)
+                            ((d_post_var + torch.pow(d_post_mean - d_prior_mean, 2)) / d_prior_var) - 1)
     return kld_f, kld_z, s_logvar, s_mean
 
 

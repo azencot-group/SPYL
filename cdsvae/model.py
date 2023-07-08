@@ -106,34 +106,34 @@ class decoder_convT(nn.Module):
 class CDSVAE(nn.Module):
     def __init__(self, opt):
         super(CDSVAE, self).__init__()
-        self.f_dim = opt.f_dim  # content
-        self.z_dim = opt.z_dim  # motion
+        self.s_dim = opt.s_dim  # content
+        self.d_dim = opt.d_dim  # motion
         self.g_dim = opt.g_dim  # frame/image feature
         self.channels = opt.channels  # image channel
         self.hidden_dim = opt.rnn_size
-        self.f_rnn_layers = opt.f_rnn_layers
+        self.s_rnn_layers = opt.s_rnn_layers
         self.frames = opt.frames
 
         self.encoder = encoder(self.g_dim, self.channels)
-        self.decoder = decoder_convT(self.z_dim + self.f_dim, self.channels)
+        self.decoder = decoder_convT(self.d_dim + self.s_dim, self.channels)
 
         # ----- Prior of content is a uniform Gaussian and Prior of motion is an LSTM
-        self.z_prior_lstm_ly1 = nn.LSTMCell(self.z_dim, self.hidden_dim)
-        self.z_prior_lstm_ly2 = nn.LSTMCell(self.hidden_dim, self.hidden_dim)
+        self.d_prior_lstm_ly1 = nn.LSTMCell(self.d_dim, self.hidden_dim)
+        self.d_prior_lstm_ly2 = nn.LSTMCell(self.hidden_dim, self.hidden_dim)
 
-        self.z_prior_mean = nn.Linear(self.hidden_dim, self.z_dim)
-        self.z_prior_logvar = nn.Linear(self.hidden_dim, self.z_dim)
+        self.d_prior_mean = nn.Linear(self.hidden_dim, self.d_dim)
+        self.d_prior_logvar = nn.Linear(self.hidden_dim, self.d_dim)
 
         # ----- Posterior of content and motion
         # content and motion features share one bi-lstm
-        self.z_lstm = nn.LSTM(self.g_dim, self.hidden_dim, 1, bidirectional=True, batch_first=True)
-        self.f_mean = nn.Linear(self.hidden_dim * 2, self.f_dim)
-        self.f_logvar = nn.Linear(self.hidden_dim * 2, self.f_dim)
+        self.d_lstm = nn.LSTM(self.g_dim, self.hidden_dim, 1, bidirectional=True, batch_first=True)
+        self.s_mean = nn.Linear(self.hidden_dim * 2, self.s_dim)
+        self.s_logvar = nn.Linear(self.hidden_dim * 2, self.s_dim)
 
         # motion features from the next RNN
-        self.z_rnn = nn.RNN(self.hidden_dim * 2, self.hidden_dim, batch_first=True)
-        self.z_mean = nn.Linear(self.hidden_dim, self.z_dim)
-        self.z_logvar = nn.Linear(self.hidden_dim, self.z_dim)
+        self.d_rnn = nn.RNN(self.hidden_dim * 2, self.hidden_dim, batch_first=True)
+        self.d_mean = nn.Linear(self.hidden_dim, self.d_dim)
+        self.d_logvar = nn.Linear(self.hidden_dim, self.d_dim)
 
     def encode_and_sample_post(self, x):
         if isinstance(x, list):
@@ -141,44 +141,44 @@ class CDSVAE(nn.Module):
         else:
             conv_x = self.encoder_frame(x)
         # pass the bidirectional lstm
-        lstm_out, _ = self.z_lstm(conv_x)
+        lstm_out, _ = self.d_lstm(conv_x)
         # get f:
         backward = lstm_out[:, 0, self.hidden_dim:2 * self.hidden_dim]
         frontal = lstm_out[:, self.frames - 1, 0:self.hidden_dim]
         lstm_out_f = torch.cat((frontal, backward), dim=1)
-        f_mean = self.f_mean(lstm_out_f)
-        f_logvar = self.f_logvar(lstm_out_f)
-        f_post = reparameterize(f_mean, f_logvar, random_sampling=True)
+        s_mean = self.s_mean(lstm_out_f)
+        s_logvar = self.s_logvar(lstm_out_f)
+        s_post = reparameterize(s_mean, s_logvar, random_sampling=True)
 
         # pass to one direction rnn
-        features, _ = self.z_rnn(lstm_out)
-        z_mean = self.z_mean(features)
-        z_logvar = self.z_logvar(features)
-        z_post = reparameterize(z_mean, z_logvar, random_sampling=True)
+        features, _ = self.d_rnn(lstm_out)
+        d_mean = self.d_mean(features)
+        d_logvar = self.d_logvar(features)
+        d_post = reparameterize(d_mean, d_logvar, random_sampling=True)
 
         if isinstance(x, list):
-            f_mean_list = [f_mean]
+            s_mean_list = [s_mean]
             for _x in x[1:]:
                 conv_x = self.encoder_frame(_x)
-                lstm_out, _ = self.z_lstm(conv_x)
+                lstm_out, _ = self.d_lstm(conv_x)
                 # get f:
                 backward = lstm_out[:, 0, self.hidden_dim:2 * self.hidden_dim]
                 frontal = lstm_out[:, self.frames - 1, 0:self.hidden_dim]
                 lstm_out_f = torch.cat((frontal, backward), dim=1)
-                f_mean = self.f_mean(lstm_out_f)
-                f_mean_list.append(f_mean)
-            f_mean = f_mean_list
-        # f_mean is list if triple else not
-        return f_mean, f_logvar, f_post, z_mean, z_logvar, z_post
+                s_mean = self.s_mean(lstm_out_f)
+                s_mean_list.append(s_mean)
+            s_mean = s_mean_list
+        # s_mean is list if triple else not
+        return s_mean, s_logvar, s_post, d_mean, d_logvar, d_post
 
     # ------ sample z from learned LSTM prior base on previous postior, teacher forcing for training  ------
-    def sample_motion_prior_train(self, z_post, random_sampling=True):
-        z_out = None
-        z_means = None
-        z_logvars = None
-        batch_size = z_post.shape[0]
+    def sample_motion_prior_train(self, d_post, random_sampling=True):
+        d_out = None
+        d_means = None
+        d_logvars = None
+        batch_size = d_post.shape[0]
 
-        z_t = torch.zeros(batch_size, self.z_dim).cuda()
+        d_t = torch.zeros(batch_size, self.d_dim).cuda()
         h_t_ly1 = torch.zeros(batch_size, self.hidden_dim).cuda()
         c_t_ly1 = torch.zeros(batch_size, self.hidden_dim).cuda()
         h_t_ly2 = torch.zeros(batch_size, self.hidden_dim).cuda()
@@ -186,31 +186,31 @@ class CDSVAE(nn.Module):
 
         for i in range(self.frames):
             # two layer LSTM and two one-layer FC
-            h_t_ly1, c_t_ly1 = self.z_prior_lstm_ly1(z_t, (h_t_ly1, c_t_ly1))
-            h_t_ly2, c_t_ly2 = self.z_prior_lstm_ly2(h_t_ly1, (h_t_ly2, c_t_ly2))
+            h_t_ly1, c_t_ly1 = self.d_prior_lstm_ly1(d_t, (h_t_ly1, c_t_ly1))
+            h_t_ly2, c_t_ly2 = self.d_prior_lstm_ly2(h_t_ly1, (h_t_ly2, c_t_ly2))
 
-            z_mean_t = self.z_prior_mean(h_t_ly2)
-            z_logvar_t = self.z_prior_logvar(h_t_ly2)
-            z_prior = reparameterize(z_mean_t, z_logvar_t, random_sampling)
-            if z_out is None:
-                z_out = z_prior.unsqueeze(1)
-                z_means = z_mean_t.unsqueeze(1)
-                z_logvars = z_logvar_t.unsqueeze(1)
+            d_mean_t = self.d_prior_mean(h_t_ly2)
+            d_logvar_t = self.d_prior_logvar(h_t_ly2)
+            d_prior = reparameterize(d_mean_t, d_logvar_t, random_sampling)
+            if d_out is None:
+                d_out = d_prior.unsqueeze(1)
+                d_means = d_mean_t.unsqueeze(1)
+                d_logvars = d_logvar_t.unsqueeze(1)
             else:
-                z_out = torch.cat((z_out, z_prior.unsqueeze(1)), dim=1)
-                z_means = torch.cat((z_means, z_mean_t.unsqueeze(1)), dim=1)
-                z_logvars = torch.cat((z_logvars, z_logvar_t.unsqueeze(1)), dim=1)
-            z_t = z_post[:, i, :]
-        return z_means, z_logvars, z_out
+                d_out = torch.cat((d_out, d_prior.unsqueeze(1)), dim=1)
+                d_means = torch.cat((d_means, d_mean_t.unsqueeze(1)), dim=1)
+                d_logvars = torch.cat((d_logvars, d_logvar_t.unsqueeze(1)), dim=1)
+            d_t = d_post[:, i, :]
+        return d_means, d_logvars, d_out
 
     # ------ sample z purely from learned LSTM prior with arbitrary frames------
     def sample_motion_prior(self, n_sample, n_frame, random_sampling=True):
-        z_out = None  # This will ultimately store all z_s in the format [batch_size, frames, z_dim]
-        z_means = None
-        z_logvars = None
+        d_out = None  # This will ultimately store all d_s in the format [batch_size, frames, d_dim]
+        d_means = None
+        d_logvars = None
         batch_size = n_sample
 
-        z_t = torch.zeros(batch_size, self.z_dim).cuda()
+        d_t = torch.zeros(batch_size, self.d_dim).cuda()
         h_t_ly1 = torch.zeros(batch_size, self.hidden_dim).cuda()
         c_t_ly1 = torch.zeros(batch_size, self.hidden_dim).cuda()
         h_t_ly2 = torch.zeros(batch_size, self.hidden_dim).cuda()
@@ -218,32 +218,32 @@ class CDSVAE(nn.Module):
 
         for i in range(n_frame):
             # two layer LSTM and two one-layer FC
-            h_t_ly1, c_t_ly1 = self.z_prior_lstm_ly1(z_t, (h_t_ly1, c_t_ly1))
-            h_t_ly2, c_t_ly2 = self.z_prior_lstm_ly2(h_t_ly1, (h_t_ly2, c_t_ly2))
+            h_t_ly1, c_t_ly1 = self.d_prior_lstm_ly1(d_t, (h_t_ly1, c_t_ly1))
+            h_t_ly2, c_t_ly2 = self.d_prior_lstm_ly2(h_t_ly1, (h_t_ly2, c_t_ly2))
 
-            z_mean_t = self.z_prior_mean(h_t_ly2)
-            z_logvar_t = self.z_prior_logvar(h_t_ly2)
-            z_t = reparameterize(z_mean_t, z_logvar_t, random_sampling)
-            if z_out is None:
-                # If z_out is none it means z_t is z_1, hence store it in the format [batch_size, 1, z_dim]
-                z_out = z_t.unsqueeze(1)
-                z_means = z_mean_t.unsqueeze(1)
-                z_logvars = z_logvar_t.unsqueeze(1)
+            d_mean_t = self.d_prior_mean(h_t_ly2)
+            d_logvar_t = self.d_prior_logvar(h_t_ly2)
+            d_t = reparameterize(d_mean_t, d_logvar_t, random_sampling)
+            if d_out is None:
+                # If d_out is none it means d_t is d_1, hence store it in the format [batch_size, 1, d_dim]
+                d_out = d_t.unsqueeze(1)
+                d_means = d_mean_t.unsqueeze(1)
+                d_logvars = d_logvar_t.unsqueeze(1)
             else:
-                # If z_out is not none, z_t is not the initial z and hence append it to the previous z_ts collected in z_out
-                z_out = torch.cat((z_out, z_t.unsqueeze(1)), dim=1)
-                z_means = torch.cat((z_means, z_mean_t.unsqueeze(1)), dim=1)
-                z_logvars = torch.cat((z_logvars, z_logvar_t.unsqueeze(1)), dim=1)
-        return z_means, z_logvars, z_out
+                # If d_out is not none, d_t is not the initial z and hence append it to the previous d_ts collected in d_out
+                d_out = torch.cat((d_out, d_t.unsqueeze(1)), dim=1)
+                d_means = torch.cat((d_means, d_mean_t.unsqueeze(1)), dim=1)
+                d_logvars = torch.cat((d_logvars, d_logvar_t.unsqueeze(1)), dim=1)
+        return d_means, d_logvars, d_out
 
     def forward(self, x):
-        f_mean, f_logvar, f_post, z_mean_post, z_logvar_post, z_post = self.encode_and_sample_post(x)
-        z_mean_prior, z_logvar_prior, z_prior = self.sample_motion_prior_train(z_post, random_sampling=True)
+        s_mean, s_logvar, s_post, d_mean_post, d_logvar_post, d_post = self.encode_and_sample_post(x)
+        d_mean_prior, d_logvar_prior, d_prior = self.sample_motion_prior_train(d_post, random_sampling=True)
 
-        f_expand = f_post.unsqueeze(1).expand(-1, self.frames, self.f_dim)
-        zf = torch.cat((z_post, f_expand), dim=2)
+        s_expand = s_post.unsqueeze(1).expand(-1, self.frames, self.s_dim)
+        zf = torch.cat((d_post, s_expand), dim=2)
         recon_x = self.decoder(zf)
-        return f_mean, f_logvar, f_post, z_mean_post, z_logvar_post, z_post, z_mean_prior, z_logvar_prior, z_prior, \
+        return s_mean, s_logvar, s_post, d_mean_post, d_logvar_post, d_post, d_mean_prior, d_logvar_prior, d_prior, \
                recon_x
 
     def encoder_frame(self, x):
@@ -259,80 +259,80 @@ class CDSVAE(nn.Module):
 
     # fixed content and sample motion for classification disagreement scores
     def forward_fixed_content_for_classification(self, x):
-        f_mean, f_logvar, f_post, z_mean_post, z_logvar_post, z_post = self.encode_and_sample_post(x)
-        # z_mean_prior, z_logvar_prior, _ = self.sample_z(x.size(0), random_sampling=True)
-        z_mean_prior, z_logvar_prior, z_out = self.sample_motion_prior(x.size(0), self.frames, random_sampling=True)
+        s_mean, s_logvar, s_post, d_mean_post, d_logvar_post, d_post = self.encode_and_sample_post(x)
+        # d_mean_prior, d_logvar_prior, _ = self.sample_z(x.size(0), random_sampling=True)
+        d_mean_prior, d_logvar_prior, d_out = self.sample_motion_prior(x.size(0), self.frames, random_sampling=True)
 
-        f_expand = f_mean.unsqueeze(1).expand(-1, self.frames, self.f_dim)
-        zf = torch.cat((z_mean_prior, f_expand), dim=2)
+        s_expand = s_mean.unsqueeze(1).expand(-1, self.frames, self.s_dim)
+        zf = torch.cat((d_mean_prior, s_expand), dim=2)
         recon_x_sample = self.decoder(zf)
 
-        zf = torch.cat((z_mean_post, f_expand), dim=2)
+        zf = torch.cat((d_mean_post, s_expand), dim=2)
         recon_x = self.decoder(zf)
 
         return recon_x_sample, recon_x
 
     # sample content and fixed motion for classification disagreement scores
     def forward_fixed_action_for_classification(self, x):
-        # z_mean_prior, z_logvar_prior, _ = self.sample_z(x.size(0), random_sampling=True)
-        f_mean, f_logvar, f_post, z_mean_post, z_logvar_post, z_post = self.encode_and_sample_post(x)
+        # d_mean_prior, d_logvar_prior, _ = self.sample_z(x.size(0), random_sampling=True)
+        s_mean, s_logvar, s_post, d_mean_post, d_logvar_post, d_post = self.encode_and_sample_post(x)
 
-        # f_expand = f_mean.unsqueeze(1).expand(-1, self.frames, self.f_dim)
+        # s_expand = s_mean.unsqueeze(1).expand(-1, self.frames, self.s_dim)
 
-        f_prior = reparameterize(torch.zeros(f_mean.shape).cuda(), torch.zeros(f_logvar.shape).cuda(),
+        s_prior = reparameterize(torch.zeros(s_mean.shape).cuda(), torch.zeros(s_logvar.shape).cuda(),
                                  random_sampling=True)
-        # f_prior = reparameterize(f_mean, torch.zeros(f_logvar.shape).cuda(), random_sampling=True)
-        f_expand = f_prior.unsqueeze(1).expand(-1, self.frames, self.f_dim)
-        zf = torch.cat((z_mean_post, f_expand), dim=2)
-        # zf = torch.cat((z_post, f_expand), dim=2)
+        # s_prior = reparameterize(s_mean, torch.zeros(s_logvar.shape).cuda(), random_sampling=True)
+        s_expand = s_prior.unsqueeze(1).expand(-1, self.frames, self.s_dim)
+        zf = torch.cat((d_mean_post, s_expand), dim=2)
+        # zf = torch.cat((d_post, s_expand), dim=2)
         recon_x_sample = self.decoder(zf)
 
-        f_expand = f_post.unsqueeze(1).expand(-1, self.frames, self.f_dim)
-        zf = torch.cat((z_post, f_expand), dim=2)
+        s_expand = s_post.unsqueeze(1).expand(-1, self.frames, self.s_dim)
+        zf = torch.cat((d_post, s_expand), dim=2)
         recon_x = self.decoder(zf)
 
         return recon_x_sample, recon_x
 
     def forward_fixed_content_for_classification_tr(self, x):
-        f_mean, f_logvar, f_post, z_mean_post, z_logvar_post, z_post = self.encode_and_sample_post(x)
-        # z_mean_prior, z_logvar_prior, _ = self.sample_z(x.size(0), random_sampling=True)
-        z_mean_prior, z_logvar_prior, z_out = self.sample_motion_prior(x.size(0), self.frames, random_sampling=True)
+        s_mean, s_logvar, s_post, d_mean_post, d_logvar_post, d_post = self.encode_and_sample_post(x)
+        # d_mean_prior, d_logvar_prior, _ = self.sample_z(x.size(0), random_sampling=True)
+        d_mean_prior, d_logvar_prior, d_out = self.sample_motion_prior(x.size(0), self.frames, random_sampling=True)
 
-        f_expand = f_mean.unsqueeze(1).expand(-1, self.frames, self.f_dim)
-        zf = torch.cat((z_mean_prior, f_expand), dim=2)
+        s_expand = s_mean.unsqueeze(1).expand(-1, self.frames, self.s_dim)
+        zf = torch.cat((d_mean_prior, s_expand), dim=2)
         recon_x_sample = self.decoder(zf)
 
         return recon_x_sample
 
     # sample content and fixed motion for classification disagreement scores
     def forward_fixed_action_for_classification_tr(self, x):
-        # z_mean_prior, z_logvar_prior, _ = self.sample_z(x.size(0), random_sampling=True)
-        f_mean, f_logvar, f_post, z_mean_post, z_logvar_post, z_post = self.encode_and_sample_post(x)
+        # d_mean_prior, d_logvar_prior, _ = self.sample_z(x.size(0), random_sampling=True)
+        s_mean, s_logvar, s_post, d_mean_post, d_logvar_post, d_post = self.encode_and_sample_post(x)
 
-        # f_expand = f_mean.unsqueeze(1).expand(-1, self.frames, self.f_dim)
+        # s_expand = s_mean.unsqueeze(1).expand(-1, self.frames, self.s_dim)
 
-        f_prior = reparameterize(torch.zeros(f_mean.shape).cuda(), torch.zeros(f_logvar.shape).cuda(),
+        s_prior = reparameterize(torch.zeros(s_mean.shape).cuda(), torch.zeros(s_logvar.shape).cuda(),
                                  random_sampling=True)
-        # f_prior = reparameterize(f_mean, torch.zeros(f_logvar.shape).cuda(), random_sampling=True)
-        f_expand = f_prior.unsqueeze(1).expand(-1, self.frames, self.f_dim)
-        zf = torch.cat((z_mean_post, f_expand), dim=2)
-        # zf = torch.cat((z_post, f_expand), dim=2)
+        # s_prior = reparameterize(s_mean, torch.zeros(s_logvar.shape).cuda(), random_sampling=True)
+        s_expand = s_prior.unsqueeze(1).expand(-1, self.frames, self.s_dim)
+        zf = torch.cat((d_mean_post, s_expand), dim=2)
+        # zf = torch.cat((d_post, s_expand), dim=2)
         recon_x_sample = self.decoder(zf)
 
         return recon_x_sample
 
     def forward_exchange(self, x):
-        f_mean, f_logvar, f, z_mean_post, z_logvar_post, z = self.encode_and_sample_post(x)
+        s_mean, s_logvar, f, d_mean_post, d_logvar_post, z = self.encode_and_sample_post(x)
 
         a = f[np.arange(0, f.shape[0], 2)]
         b = f[np.arange(1, f.shape[0], 2)]
-        f_mix = torch.stack((b, a), dim=1).view((-1, f.shape[1]))
+        s_mix = torch.stack((b, a), dim=1).view((-1, f.shape[1]))
 
-        f_expand = f_mix.unsqueeze(1).expand(-1, self.frames, self.f_dim)
+        s_expand = s_mix.unsqueeze(1).expand(-1, self.frames, self.s_dim)
 
-        zf = torch.cat((z, f_expand), dim=2)
+        zf = torch.cat((z, s_expand), dim=2)
         recon_x = self.decoder(zf)
-        return f_mean, f_logvar, f, None, None, z, None, None, recon_x
+        return s_mean, s_logvar, f, None, None, z, None, None, recon_x
 
 
 # ---------------- classifier -----------------------
