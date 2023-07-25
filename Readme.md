@@ -36,6 +36,8 @@ The second experiment, is a display of a swap. You can run both experiment using
 python ./swaps_experiments.py
 ```
 
+Weights of trained model will uploaded soon.
+
 
 ## Paper
 ```@misc{naiman2023sample,
