@@ -322,18 +322,29 @@ class CDSVAE(nn.Module):
         return recon_x_sample
 
     def forward_exchange(self, x):
-        s_mean, s_logvar, f, d_mean_post, d_logvar_post, z = self.encode_and_sample_post(x)
+        s_mean, s_logvar, s, d_mean_post, d_logvar_post, d = self.encode_and_sample_post(x)
 
-        a = f[np.arange(0, f.shape[0], 2)]
-        b = f[np.arange(1, f.shape[0], 2)]
-        s_mix = torch.stack((b, a), dim=1).view((-1, f.shape[1]))
+        a = s[np.arange(0, s.shape[0], 2)]
+        b = s[np.arange(1, s.shape[0], 2)]
+        s_mix = torch.stack((b, a), dim=1).view((-1, s.shape[1]))
 
         s_expand = s_mix.unsqueeze(1).expand(-1, self.frames, self.s_dim)
 
-        zf = torch.cat((z, s_expand), dim=2)
+        zf = torch.cat((d, s_expand), dim=2)
         recon_x = self.decoder(zf)
-        return s_mean, s_logvar, f, None, None, z, None, None, recon_x
+        return s_mean, s_logvar, s, None, None, d, None, None, recon_x
 
+    def swap(self, x):
+        s_mean, s_logvar, s, d_mean_post, d_logvar_post, d = self.encode_and_sample_post(x)
+        s1, d1 = s_mean[0][None, :].expand(self.frames, s.shape[-1]), d_mean_post[0]
+        s2, d2 = s_mean[1][None, :].expand(self.frames, s.shape[-1]), d_mean_post[1]
+
+        s1d2 = torch.cat((d2, s1), dim=1)
+        s2d1 = torch.cat((d1, s2), dim=1)
+        sd = torch.stack([s1d2, s2d1])
+        recon_x = self.decoder(sd)
+
+        return recon_x
 
 # ---------------- classifier -----------------------
 class classifier_Sprite_all(nn.Module):
