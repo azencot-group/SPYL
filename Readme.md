@@ -36,6 +36,13 @@ The second experiment, is a display of a swap. You can run both experiment using
 python ./swaps_experiments.py
 ```
 
+### Pre Trained Model: 
+To run the experiment, you need either train you own model or download and use a pretrained model from the Drive:
+```
+https://drive.google.com/drive/u/1/folders/1Q072qp1hn2WDsDXG0XCmXmAwuNasJ8Yy
+```
+Download the file and locate it into  '"./weights/model.pth"' 
+
 
 ## Paper
 ```@misc{naiman2023sample,
