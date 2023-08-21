@@ -45,7 +45,8 @@ Download the file and locate it into  '"./weights/model.pth"'
 
 
 ## Paper
-```@inproceedings{naiman23sample,
+```
+@inproceedings{naiman23sample,
   author    = {Ilan Naiman and Nimrod Berman and Omri Azencot},
   title     = {Sample and Predict Your Latent: Modality-free Sequential Disentanglement via Contrastive Estimation},
   booktitle = {International Conference on Machine Learning},
