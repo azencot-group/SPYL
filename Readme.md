@@ -15,7 +15,7 @@ we collect the closest S^+$ and farthest $S^-$ distributions in the batch.
 We sample from these distributions using the reparameterization trick.
 The scheme is the same for sampling dynamic content ($d$)
 In the right figure (B), we show how we use our predictive sampling trick,
-generating samples by using the posterior of the sampled prior.
+generating samples by using the posterior of the sampled prior. The full [paper](https://proceedings.mlr.press/v202/naiman23a/naiman23a.pdf).
 
 ## Training
 
@@ -45,7 +45,7 @@ Download the file and locate it into  '"./weights/model.pth"'
 
 
 ## Paper
-```
+```bibtex
 @inproceedings
 {naiman23sample,
 author={Ilan Naiman and Nimrod Berman and Omri Azencot},
